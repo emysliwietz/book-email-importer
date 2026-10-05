@@ -1,0 +1,7 @@
+[project]
+name = "book-email-importer"
+version = "0.1.0"
+description = "Imports ebooks/PDFs mailed to an address into a Kavita library, with metadata from Google AI"
+authors = [{name = "Sermak", email = "egidius.mysliwietz@gmx.de"}]
+requires-python = ">=3.13"
+dependencies = ["imapclient (>=3.1.0,<4.0.0)", "python-dotenv (>=1.0.0)", "requests (>=2.32,<3)", "pillow (>=11,<13)"]
