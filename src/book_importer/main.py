@@ -176,7 +176,8 @@ def attempt(server: IMAPClient, uid: int | None, raw: bytes, msg, entry: dict | 
     failed = (entry["attempt"] if entry else 0) + (1 if error else 0)
 
     if error:
-        delay = retry.delay_after(failed)
+        started = entry["created"] if entry else time.time()
+        delay = retry.delay_after(failed, started)
         if delay is not None:
             try:
                 next_at = time.time() + delay * 60
@@ -185,13 +186,13 @@ def attempt(server: IMAPClient, uid: int | None, raw: bytes, msg, entry: dict | 
                     retry.save(entry)
                 else:
                     entry = retry.add(raw, uid, failed, next_at, placed, notified=False, error=error)
-                print(f"🔁 Retry {failed} of {len(config.RETRY_SCHEDULE_MIN)} in {retry.human(delay)} ({entry['id']})")
+                print(f"🔁 Retry {failed} in {retry.human(delay)} ({entry['id']})")
                 if not entry["notified"]:
-                    left = config.RETRY_SCHEDULE_MIN[failed - 1:]
-                    more = (f", danach bei Bedarf noch {len(left) - 1} weitere Male (insgesamt etwa "
-                            f"{retry.human(sum(left))} lang)") if len(left) > 1 else ""
+                    gap = max(config.RETRY_SCHEDULE_MIN)
                     reply(msg, [], error, note=(
-                        f"Es wird automatisch noch einmal versucht: in {retry.human(delay)}{more}. "
+                        f"Es wird automatisch noch einmal versucht: in {retry.human(delay)}, danach bei Bedarf "
+                        f"immer wieder (höchstens alle {retry.human(gap)}), bis zu "
+                        f"{retry.human(config.RETRY_MAX_DAYS * 1440)} lang. "
                         "Eine weitere E-Mail folgt, sobald es geklappt hat oder aufgegeben wird."))
                     entry["notified"] = True
                     retry.save(entry)
@@ -204,8 +205,9 @@ def attempt(server: IMAPClient, uid: int | None, raw: bytes, msg, entry: dict | 
     if entry and not error:
         note = "Der erneute Versuch hat geklappt" + (f" (Versuch {failed + 1})." if failed else ".")
     elif error and failed > 1:
-        note = (f"Auch nach {failed} Versuchen ging es nicht - es wird nicht weiter versucht. "
-                "Bitte die E-Mail noch einmal schicken, wenn das Problem behoben ist.")
+        days = retry.human((time.time() - entry["created"]) / 60) if entry else ""
+        note = (f"Beschwerde: Seit {days} und {failed} Versuchen klappt dieser Import nicht - es wird nicht "
+                "weiter versucht. Bitte das Problem beheben (siehe Fehler oben) und die E-Mail noch einmal schicken.")
     if error and placed:
         note = (note + "\n" if note else "") + "Schon abgelegt wurden:\n" + "\n".join(f"   • {p}" for p in placed)
     reply(msg, results, error, note)

@@ -73,11 +73,16 @@ def next_due() -> float | None:
     return es[0]["next_at"] if es else None
 
 
-def delay_after(failed_attempts: int) -> float | None:
-    """Minutes to wait after the n-th failed attempt (1 = the original import), None = give up."""
-    if 1 <= failed_attempts <= len(config.RETRY_SCHEDULE_MIN):
-        return config.RETRY_SCHEDULE_MIN[failed_attempts - 1]
-    return None
+def delay_after(failed_attempts: int, started: float, now: float | None = None) -> float | None:
+    """Minutes to wait after the n-th failed attempt (1 = the original import), None = give up.
+    started: time of the first failure. The last gap repeats; the final attempt lands at RETRY_MAX_DAYS."""
+    sched = config.RETRY_SCHEDULE_MIN
+    if not sched or failed_attempts < 1:
+        return None
+    left = (started + config.RETRY_MAX_DAYS * 86400 - (time.time() if now is None else now)) / 60
+    if left <= 0:
+        return None
+    return min(sched[min(failed_attempts, len(sched)) - 1], left)
 
 
 def human(minutes: float) -> str:

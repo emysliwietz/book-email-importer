@@ -112,13 +112,20 @@ def test_gives_up_after_schedule(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "process", lambda *a: (_ for _ in ()).throw(OSError("NAS weg")))
     server = FakeServer()
     main.handle(server, 7, make_mail())
-    for _ in range(3):
+    # keeps retrying past the end of the schedule (last gap repeats) ...
+    for _ in range(5):
         [entry] = retry.entries()
         entry["next_at"] = 0
         retry.save(entry)
         main.run_retries(server)
+    [entry] = retry.entries()
+    assert entry["attempt"] == 6 and len(replies) == 1 and server.flagged == []
+    # ... until a week after the first failure, then complains once and gives up
+    entry["next_at"], entry["created"] = 0, entry["created"] - 8 * 86400
+    retry.save(entry)
+    main.run_retries(server)
     assert retry.entries() == [] and server.flagged == [7]
-    assert len(replies) == 2 and "nach 4 Versuchen" in replies[-1][2]
+    assert len(replies) == 2 and "Beschwerde: Seit 8 Tage" in replies[-1][2] and "7 Versuchen" in replies[-1][2]
     assert os.listdir(config.RETRY_DIR) == []
 
 
@@ -132,5 +139,9 @@ def test_fresh_mail_with_same_files_asks_again(tmp_path, monkeypatch):
 
 def test_schedule_and_wording(monkeypatch):
     monkeypatch.setattr(config, "RETRY_SCHEDULE_MIN", [5, 15, 60, 180, 360, 720])
-    assert [retry.delay_after(n) for n in range(0, 8)] == [None, 5, 15, 60, 180, 360, 720, None]
+    monkeypatch.setattr(config, "RETRY_MAX_DAYS", 7)
+    t0 = 1_000_000.0
+    assert [retry.delay_after(n, t0, t0) for n in range(0, 9)] == [None, 5, 15, 60, 180, 360, 720, 720, 720]
+    assert retry.delay_after(20, t0, t0 + 7 * 86400 - 600) == 10          # last attempt lands exactly at a week
+    assert retry.delay_after(21, t0, t0 + 7 * 86400) is None
     assert retry.human(5) == "5 Minuten" and retry.human(60) == "1 Stunde" and retry.human(1340) == "22,3 Stunden"
