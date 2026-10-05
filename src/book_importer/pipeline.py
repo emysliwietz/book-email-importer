@@ -1,10 +1,12 @@
 """From attachment files to finished, tagged books in the library (one Gemini query for all of them)."""
 import hashlib
+import json
 import os
 import re
 import shutil
 import tempfile
 import threading
+import time
 import zipfile
 
 from . import calibre, config, covers, gemini, kavita
@@ -102,6 +104,47 @@ def _place(src: str, target_dir: str, name: str) -> tuple[str, str]:
     return dst, status
 
 
+# ---------- Google AI answer cache (a retry of the same mail must not ask again) ----------
+def _cache_path(items: list[dict]) -> str:
+    key = hashlib.sha256("\n".join(sha256(it["work_copy"]) for it in items).encode()).hexdigest()
+    return os.path.join(config.CACHE_DIR, key + ".json")
+
+
+def _cache_prune() -> None:
+    cutoff = time.time() - config.CACHE_DAYS * 86400
+    for f in os.listdir(config.CACHE_DIR):
+        p = os.path.join(config.CACHE_DIR, f)
+        try:
+            if os.path.getmtime(p) < cutoff:
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def ask_cached(items: list[dict], known: list[str], use_cache: bool) -> list[dict]:
+    """The single Gemini request of a mail. Every answer is stored right away (before anything is written to the
+    library, which is where imports usually fail); only retries read it back."""
+    path = _cache_path(items)
+    if use_cache:
+        try:
+            with open(path) as f:
+                answers = json.load(f)
+            print("🗃️ Google AI answer taken from cache - no new request")
+            return answers
+        except (OSError, ValueError):
+            pass
+    answers = gemini.ask([it["ask"] for it in items], known)
+    try:
+        os.makedirs(config.CACHE_DIR, exist_ok=True)
+        _cache_prune()
+        with open(path + ".tmp", "w") as f:
+            json.dump(answers, f, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        print(f"⚠️ Could not cache the Google AI answer: {e}")
+    return answers
+
+
 # ---------- grouping helpers ----------
 CONVERT_PREFERENCE = [".azw3", ".mobi", ".azw", ".fb2", ".lit", ".pdb", ".rtf"]   # best source for an EPUB first
 
@@ -119,8 +162,13 @@ def _best(files: list[dict]) -> dict:
 
 
 # ---------- main entry ----------
-def process(files: list[str]) -> list[dict]:
-    """files: saved attachments. Returns one result dict per WORK (for logging and the reply email)."""
+def process(files: list[str], placed: list[str] | None = None, placed_before=(), use_cache: bool = False) -> list[dict]:
+    """files: saved attachments. Returns one result dict per WORK (for logging and the reply email).
+    placed: every file written to the library is appended here (relative path) as soon as it is there, so a failed
+    attempt still knows what it already did. placed_before: those paths from earlier attempts of the same mail -
+    they are reported as new, not as "already in the library". use_cache: reuse a stored Google AI answer (retries)."""
+    placed = [] if placed is None else placed
+    placed_before = set(placed_before)
     results = []
     with tempfile.TemporaryDirectory(dir=config.WORK_DIR) as work:
         books = unpack(files, work)
@@ -143,7 +191,7 @@ def process(files: list[str]) -> list[dict]:
 
         # 2. ONE Gemini request for all attachments of this email (also says which files are the same work/edition)
         known = categories()
-        answers = {a.get("index"): a for a in gemini.ask([it["ask"] for it in items], known)}
+        answers = {a.get("index"): a for a in ask_cached(items, known, use_cache)}
 
         groups: dict[int, list[dict]] = {}
         for it in items:
@@ -160,11 +208,11 @@ def process(files: list[str]) -> list[dict]:
 
         # 3. one folder + one consistent set of metadata per work
         for gi, members in enumerate(groups.values()):
-            results.append(_import_work(gi, members, known))
+            results.append(_import_work(gi, members, known, placed, placed_before))
     return results
 
 
-def _import_work(gi: int, members: list[dict], known: list[str]) -> dict:
+def _import_work(gi: int, members: list[dict], known: list[str], placed: list[str], placed_before: set[str]) -> dict:
     # the most confident answer (EPUB/larger file as tie-breaker) defines the shared metadata of the work
     lead = max(members, key=lambda m: (m["a"].get("confidence") or 0, m["ext"] == ".epub",
                                        os.path.getsize(m["work_copy"])))["a"]
@@ -178,7 +226,9 @@ def _import_work(gi: int, members: list[dict], known: list[str]) -> dict:
     category = safe_category(lead.get("category"), known)
     base = base_name(title, authors)
     target_dir = os.path.join(config.LIBRARY_DIR, *category.split("/"), base)
-    existed_before = os.path.isdir(target_dir)
+    rel_dir = os.path.relpath(target_dir, config.LIBRARY_DIR) + os.sep
+    # a folder that only an earlier attempt of this same mail created doesn't count as "already there"
+    existed_before = os.path.isdir(target_dir) and not any(p.startswith(rel_dir) for p in placed_before)
 
     # editions inside this work (Gemini gives identical labels to files of the same edition)
     editions: dict[str, list[dict]] = {}
@@ -225,7 +275,9 @@ def _import_work(gi: int, members: list[dict], known: list[str]) -> dict:
             calibre.write_meta(path, meta, cover)
             dst, status = _place(path, target_dir, name + os.path.splitext(path)[1].lower())
             rel = os.path.relpath(dst, config.LIBRARY_DIR)
-            if status == "duplicate":
+            if status == "new":
+                placed.append(rel)
+            if status == "duplicate" and rel not in placed_before:
                 file_rows.append((label, f"schon in der Bibliothek: {os.path.basename(dst)} - übersprungen"))
             else:
                 file_rows.append((label, f"neu: {os.path.basename(dst)}"))

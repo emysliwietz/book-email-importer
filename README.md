@@ -21,6 +21,12 @@ with a cover — in your [Kavita](https://www.kavitareader.com/) library. Siblin
    cover is uploaded to the new Kavita series and locked.
 7. The sender gets a short reply listing what was imported where (or why not).
 
+**When an import fails** (library not writable, NAS gone, network error, …) the mail is retried automatically,
+by default 5 min, 15 min, 1 h, 3 h, 6 h and 12 h after each failed attempt (about a day in total). The sender
+gets one mail saying so, then one final mail on success or when all attempts failed. Waiting mails live in
+`RETRY_DIR`, so a container restart doesn't lose them. Retries reuse the stored Google AI answer (no second
+request), and files an earlier attempt already filed are reported as new, not as "already in the library".
+
 **Several files in one mail:** different books are filed separately. Files that are the *same work* (other format
 or another edition) are recognised in the same single AI request and get one folder and one consistent set of
 metadata. A real EPUB always wins over a converted one (conversion only happens when no EPUB of that edition was
@@ -54,6 +60,9 @@ says for every file whether it is new, already in the library or a second copy i
 | `REPLY_ENABLED` | | `true` | Send a result mail back to the sender |
 | `SMTP_SERVER` / `SMTP_PORT` | | `smtp.strato.de` / `587` | For the reply |
 | `SMTP_SENDER_EMAIL` / `SMTP_SENDER_PASSWORD` | | the IMAP account | For the reply |
+| `RETRY_SCHEDULE_MIN` | | `5,15,60,180,360,720` | Minutes to wait after each failed attempt; empty = no retries |
+| `RETRY_DIR` / `CACHE_DIR` | | `/data/retry` / `/data/cache` | Waiting mails / stored Google AI answers |
+| `CACHE_DAYS` | | `7` | Stored Google AI answers older than this are removed |
 | `DELETE_AFTER_IMPORT` | | `false` | Delete the mail after a successful import (otherwise it's marked read) |
 | `EXCERPT_CHARS` | | `6000` | How much book text goes into the AI request |
 | `FILE_MODE` / `DIR_MODE` | | `664` / `775` | Permissions of created files/folders |
@@ -78,6 +87,16 @@ On first start the listener ignores the mails already in the inbox and only hand
     volumes:
       - /mnt/media/books:/books          # same host folder Kavita uses
       - /root/docker/book-importer:/data # state + temp files
+```
+
+## Retry a mail by hand
+
+E.g. one that failed before retries existed. List the inbox with UIDs, then queue the mail; the running importer
+picks it up within `IDLE_TIMEOUT` seconds:
+
+```sh
+docker exec book-importer python -m book_importer.requeue
+docker exec book-importer python -m book_importer.requeue 1234
 ```
 
 ## Import local files (no mail)

@@ -28,6 +28,13 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "300"))
 STATE_FILE = os.getenv("STATE_FILE", "/data/last_seen_uid.txt")
 WORK_DIR = os.getenv("WORK_DIR", "/data/work")
 DELETE_AFTER_IMPORT = _bool("DELETE_AFTER_IMPORT", False)
+# Failed imports (e.g. library not writable, network error) are tried again. Minutes to wait after each failed
+# attempt; the default adds up to about a day. Empty = no retries.
+RETRY_SCHEDULE_MIN = [float(x) for x in _list("RETRY_SCHEDULE_MIN", "5,15,60,180,360,720")]
+RETRY_DIR = os.getenv("RETRY_DIR", "/data/retry")
+# Google AI answers are kept here so a retry doesn't ask again (entries older than CACHE_DAYS are removed).
+CACHE_DIR = os.getenv("CACHE_DIR", "/data/cache")
+CACHE_DAYS = float(os.getenv("CACHE_DAYS", "7"))
 
 # --- replies (optional; defaults reuse the mailbox credentials) ---
 REPLY_ENABLED = _bool("REPLY_ENABLED", True)
