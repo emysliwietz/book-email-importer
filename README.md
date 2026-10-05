@@ -7,7 +7,7 @@ with a cover — in your [Kavita](https://www.kavitareader.com/) library. Siblin
 ## What happens to a mail
 
 1. The IMAP listener (IDLE) sees a new mail to `TARGET_ADDRESS` from an allowed sender.
-2. Book attachments are collected (ZIPs are unpacked). MOBI/AZW3/FB2/… are converted to EPUB with calibre, because
+2. Book attachments are collected (ZIPs are unpacked). MOBI/AZW3/FB2/… are converted to EPUB with calibre when no EPUB was attached, because
    Kavita can't read them (the original is kept next to it).
 3. **One Google AI (Gemini) request per mail — for all its books together.** It gets the file names, the
    embedded metadata, the text of the first pages and the list of existing library folders, and returns strict JSON:
@@ -21,7 +21,13 @@ with a cover — in your [Kavita](https://www.kavitareader.com/) library. Siblin
    cover is uploaded to the new Kavita series and locked.
 7. The sender gets a short reply listing what was imported where (or why not).
 
-Duplicates (same title, author and format already present) are never overwritten — the reply says so.
+**Several files in one mail:** different books are filed separately. Files that are the *same work* (other format
+or another edition) are recognised in the same single AI request and get one folder and one consistent set of
+metadata. A real EPUB always wins over a converted one (conversion only happens when no EPUB of that edition was
+attached). Different editions are kept side by side with the edition in the name, e.g.
+`Think Python - Allen Downey (2nd ed., 2015).pdf`. Two copies of the same edition and format in one mail: the larger
+one is kept. Files already in the library (same title, author, edition and format) are never overwritten. The reply
+says for every file whether it is new, already in the library or a second copy in the mail.
 
 ## Environment variables
 
@@ -33,7 +39,7 @@ Duplicates (same title, author and format already present) are never overwritten
 | `KAVITA_API_KEY` | recommended | | Kavita auth key of an **admin** user (Kavita → Settings → Account → Auth keys) |
 | `ALLOWED_SENDERS` | recommended | *(everyone)* | Comma-separated addresses and/or domains, e.g. `me@gmx.de,example.org` |
 | `IMAP_SERVER` | | `imap.strato.de` | |
-| `TARGET_ADDRESS` | | `EMAIL_ACCOUNT` | Only mails sent to this address are processed |
+| `TARGET_ADDRESS` | | `EMAIL_ACCOUNT` | Recipient address(es) that trigger an import, comma-separated (e.g. an alias that forwards into the mailbox); `*` = every mail in the mailbox |
 | `IDLE_TIMEOUT` | | `300` | Seconds per IMAP IDLE round |
 | `GEMINI_MODEL` | | `gemini-flash-latest` | Any Gemini model with structured output |
 | `GEMINI_USE_SEARCH` | | `true` | Google Search grounding inside the single request |

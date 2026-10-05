@@ -17,6 +17,12 @@ BOOK_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "index": {"type": "INTEGER", "description": "index of the book in the input list"},
+        "work_group": {"type": "INTEGER",
+                       "description": "same number for all files that are the same work (any format or edition); "
+                                      "use the smallest index of the group. A translation is a different work."},
+        "edition": {"type": "STRING",
+                    "description": "short edition label like '2nd ed.' or 'Revised ed.'; IDENTICAL string for files "
+                                   "that are the same edition; empty if unknown or only one edition is present"},
         "title": {"type": "STRING", "description": "main title only, no subtitle, correct capitalisation"},
         "subtitle": {"type": "STRING"},
         "authors": {"type": "ARRAY", "items": {"type": "STRING"},
@@ -35,7 +41,7 @@ BOOK_SCHEMA = {
         "confidence": {"type": "NUMBER", "description": "0..1 how sure you are about title+author"},
         "not_a_book": {"type": "BOOLEAN", "description": "true if the file is clearly not a book (invoice, form, ...)"},
     },
-    "required": ["index", "title", "authors", "language", "tags", "category", "confidence"],
+    "required": ["index", "work_group", "title", "authors", "language", "tags", "category", "confidence"],
 }
 SCHEMA = {"type": "OBJECT", "properties": {"books": {"type": "ARRAY", "items": BOOK_SCHEMA}}, "required": ["books"]}
 
@@ -52,6 +58,10 @@ Rules:
 like "Informatics/Hacking" is allowed when listed). {new_rule}
 - language: the language of the book text.
 - not_a_book: true for things that are clearly no book (invoices, receipts, scanned forms).
+- Several files may be the SAME WORK (other format, or another edition of it). Give them the same work_group and \
+EXACTLY the same title, subtitle, authors, series, category, tags and description. Files of the same edition get \
+the same edition label; different editions get different labels (e.g. "2nd ed.", "3rd ed.") and their own \
+published year, ISBN and publisher.
 
 EXISTING CATEGORIES:
 {categories}

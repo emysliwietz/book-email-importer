@@ -32,3 +32,10 @@ def test_sender_allowed():
     assert sender_allowed(["anyone@example.org"])
     assert sender_allowed(["x@sermak.xyz"])
     assert not sender_allowed(["x@evil.example.org.attacker.com"])
+
+
+def test_edition_suffix():
+    assert pipeline.edition_suffix("2nd ed.", "2015-01-01", 1) == " (2nd ed., 2015)"
+    assert pipeline.edition_suffix("", "", 2) == " (Version 2)"
+    assert pipeline.edition_suffix("Rev. ed.: Final", "2012", 1) == " (Rev. ed. - Final, 2012)"
+    assert pipeline.edition_suffix("", "1999", 1) == " (1999)"

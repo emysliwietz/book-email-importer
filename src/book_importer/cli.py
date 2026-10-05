@@ -4,6 +4,7 @@ import os
 import sys
 
 from . import config, pipeline
+from .main import reply_text
 
 
 def main() -> None:
@@ -11,8 +12,10 @@ def main() -> None:
     if not files:
         sys.exit("usage: python -m book_importer.cli FILE [FILE...]")
     os.makedirs(config.WORK_DIR, exist_ok=True)
-    for r in pipeline.process(files):
+    results = pipeline.process(files)
+    for r in results:
         print(json.dumps(r, ensure_ascii=False, indent=1))
+    print("\n----- reply mail would be: -----\n" + reply_text(results))
 
 
 if __name__ == "__main__":

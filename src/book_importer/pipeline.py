@@ -102,98 +102,164 @@ def _place(src: str, target_dir: str, name: str) -> tuple[str, str]:
     return dst, status
 
 
+# ---------- grouping helpers ----------
+CONVERT_PREFERENCE = [".azw3", ".mobi", ".azw", ".fb2", ".lit", ".pdb", ".rtf"]   # best source for an EPUB first
+
+
+def edition_suffix(label: str, year: str, n: int) -> str:
+    label = re.sub(r"\s+", " ", FORBIDDEN.sub("", (label or "").replace(":", " -"))).strip()[:40]
+    year = (year or "")[:4] if re.match(r"^\d{4}", year or "") else ""
+    parts = [p for p in (label, year) if p]
+    return f" ({', '.join(parts)})" if parts else f" (Version {n})"
+
+
+def _best(files: list[dict]) -> dict:
+    """Among several copies of the same edition+format keep the largest (usually the most complete) one."""
+    return max(files, key=lambda f: os.path.getsize(f["work_copy"]))
+
+
 # ---------- main entry ----------
 def process(files: list[str]) -> list[dict]:
-    """files: saved attachments. Returns one result dict per book (for logging and the reply email)."""
+    """files: saved attachments. Returns one result dict per WORK (for logging and the reply email)."""
     results = []
     with tempfile.TemporaryDirectory(dir=config.WORK_DIR) as work:
         books = unpack(files, work)
         if not books:
             return results
 
-        # 1. prepare every book locally: convert for Kavita if needed, read metadata + first pages
-        prepared = []
+        # 1. read every attachment (no conversion yet - that is decided per edition later)
+        items = []
         for i, src in enumerate(books):
             ext = os.path.splitext(src)[1].lower()
             bdir = os.path.join(work, f"b{i}")
             os.makedirs(bdir)
-            # always work on our own copy - metadata is written into the file before it goes to the library
-            work_copy = os.path.join(bdir, "book" + ext)
+            work_copy = os.path.join(bdir, "book" + ext)       # never touch the attachment itself
             shutil.copyfile(src, work_copy)
-            primary, originals = work_copy, []
-            src_name = os.path.basename(src)
-            if ext in config.CONVERTIBLE and config.CONVERT_TO_EPUB:
-                epub = os.path.join(bdir, "converted.epub")
-                if calibre.convert(work_copy, epub):
-                    primary = epub
-                    if config.KEEP_ORIGINAL:
-                        originals.append(work_copy)
-            excerpt, pages = calibre.text_excerpt(primary, config.EXCERPT_CHARS)
-            prepared.append({"src": src, "primary": primary, "originals": originals, "dir": bdir})
-            prepared[-1]["ask"] = {
-                "index": i, "file_name": src_name, "format": ext.lstrip("."),
-                "size_mb": round(os.path.getsize(work_copy) / 1e6, 1), "pages": pages,
-                "embedded_metadata": calibre.read_meta(primary), "text_excerpt": excerpt,
-            }
+            excerpt, pages = calibre.text_excerpt(work_copy, config.EXCERPT_CHARS)
+            items.append({"index": i, "name": os.path.basename(src), "ext": ext, "work_copy": work_copy, "dir": bdir,
+                          "ask": {"index": i, "file_name": os.path.basename(src), "format": ext.lstrip("."),
+                                  "size_mb": round(os.path.getsize(work_copy) / 1e6, 1), "pages": pages,
+                                  "embedded_metadata": calibre.read_meta(work_copy), "text_excerpt": excerpt}})
 
-        # 2. ONE Gemini request for all books of this email
+        # 2. ONE Gemini request for all attachments of this email (also says which files are the same work/edition)
         known = categories()
-        answers = {a.get("index"): a for a in gemini.ask([p["ask"] for p in prepared], known)}
+        answers = {a.get("index"): a for a in gemini.ask([it["ask"] for it in items], known)}
 
-        # 3. apply metadata, cover, file into the library, rescan in Kavita
-        for i, p in enumerate(prepared):
-            a = answers.get(i)
-            name = p["ask"]["file_name"]
+        groups: dict[int, list[dict]] = {}
+        for it in items:
+            a = answers.get(it["index"])
             if not a:
-                results.append({"file": name, "ok": False, "error": "keine Antwort von Google AI"})
+                results.append({"ok": False, "files": [(it["name"], "keine Antwort von Google AI")]})
                 continue
             if a.get("not_a_book"):
-                results.append({"file": name, "ok": False, "error": "kein Buch (laut Google AI) - ignoriert"})
+                results.append({"ok": False, "files": [(it["name"], "kein Buch (laut Google AI) - ignoriert")]})
                 continue
-            title = (a.get("title") or "").strip() or os.path.splitext(name)[0]
-            authors = [x.strip() for x in a.get("authors") or [] if x and x.strip()][:4]
-            meta = dict(a, title=title, authors=authors,
-                        full_title=title + (f": {a['subtitle'].strip()}" if (a.get("subtitle") or "").strip() else ""),
-                        isbn=re.sub(r"[^\dX]", "", (a.get("isbn") or "").upper()),
-                        tags=[t.strip() for t in a.get("tags") or [] if t.strip()][:8])
-            category = safe_category(a.get("category"), known)
-            base = base_name(title, authors)
-            target_dir = os.path.join(config.LIBRARY_DIR, *category.split("/"), base)
+            it["a"] = a
+            g = a.get("work_group")
+            groups.setdefault(g if isinstance(g, int) else 10_000 + it["index"], []).append(it)
 
-            cover, cover_src = covers.best_cover(p["primary"], meta, p["dir"])
-            files_out, statuses = [], []
-            for f in [p["primary"], *p["originals"]]:
-                calibre.write_meta(f, meta, cover)
-                os.makedirs(target_dir, mode=config.DIR_MODE, exist_ok=True)
-                dst, st = _place(f, target_dir, base + os.path.splitext(f)[1].lower())
-                files_out.append(dst)
-                statuses.append(st)
-            if config.WRITE_SIDECARS:
-                if cover:
-                    shutil.copyfile(cover, os.path.join(target_dir, "cover.jpg"))
-                calibre.write_opf(files_out[0], os.path.join(target_dir, "metadata.opf"))
-            for root, dirs, fs in os.walk(target_dir):
-                for x in fs:
-                    try:
-                        os.chmod(os.path.join(root, x), config.FILE_MODE)
-                    except OSError:
-                        pass
-
-            if all(s == "duplicate" for s in statuses):
-                results.append({"file": name, "ok": True, "duplicate": True, "base": base, "category": category})
-                continue
-            scanned = kavita.scan_folder(target_dir)
-            if scanned and cover and files_out[0].lower().endswith(".pdf"):
-                # PDFs can't carry a cover - give it to Kavita directly once the scan has picked the book up
-                keep = os.path.join(config.WORK_DIR, f"cover_{os.getpid()}_{i}.jpg")
-                shutil.copyfile(cover, keep)
-                threading.Thread(target=lambda t=title, fn=os.path.basename(files_out[0]), c=keep:
-                                 (kavita.set_cover(t, fn, c), os.remove(c)), daemon=True).start()
-            results.append({
-                "file": name, "ok": True, "base": base, "category": category, "new_category": category not in known,
-                "files": [os.path.relpath(x, config.LIBRARY_DIR) for x in files_out], "statuses": statuses,
-                "authors": authors, "title": meta["full_title"], "isbn": meta["isbn"], "tags": meta["tags"],
-                "language": a.get("language"), "published": a.get("published"), "publisher": a.get("publisher"),
-                "confidence": a.get("confidence"), "cover": cover_src, "kavita": scanned,
-            })
+        # 3. one folder + one consistent set of metadata per work
+        for gi, members in enumerate(groups.values()):
+            results.append(_import_work(gi, members, known))
     return results
+
+
+def _import_work(gi: int, members: list[dict], known: list[str]) -> dict:
+    # the most confident answer (EPUB/larger file as tie-breaker) defines the shared metadata of the work
+    lead = max(members, key=lambda m: (m["a"].get("confidence") or 0, m["ext"] == ".epub",
+                                       os.path.getsize(m["work_copy"])))["a"]
+    title = (lead.get("title") or "").strip() or os.path.splitext(members[0]["name"])[0]
+    authors = [x.strip() for x in lead.get("authors") or [] if x and x.strip()][:4]
+    subtitle = (lead.get("subtitle") or "").strip()
+    common = {"title": title, "authors": authors, "full_title": title + (f": {subtitle}" if subtitle else ""),
+              "series": lead.get("series"), "series_index": lead.get("series_index"),
+              "tags": [t.strip() for t in lead.get("tags") or [] if t.strip()][:8],
+              "description": lead.get("description"), "language": lead.get("language")}
+    category = safe_category(lead.get("category"), known)
+    base = base_name(title, authors)
+    target_dir = os.path.join(config.LIBRARY_DIR, *category.split("/"), base)
+    existed_before = os.path.isdir(target_dir)
+
+    # editions inside this work (Gemini gives identical labels to files of the same edition)
+    editions: dict[str, list[dict]] = {}
+    for m in members:
+        editions.setdefault(re.sub(r"\s+", " ", (m["a"].get("edition") or "").strip().lower()), []).append(m)
+    multi = len(editions) > 1
+
+    file_rows, new_files, covers_used, pdf_only_cover = [], [], [], None
+    for n, (ekey, ed_members) in enumerate(editions.items(), start=1):
+        ref = max(ed_members, key=lambda m: m["a"].get("confidence") or 0)["a"]
+        meta = dict(common, edition=ref.get("edition"), published=ref.get("published"), publisher=ref.get("publisher"),
+                    isbn=re.sub(r"[^\dX]", "", (ref.get("isbn") or "").upper()))
+        suffix = edition_suffix(ref.get("edition"), ref.get("published"), n) if multi else ""
+        name = base + suffix
+
+        # one file per format; extra copies of the same format+edition in this email are skipped
+        by_ext: dict[str, list[dict]] = {}
+        for m in ed_members:
+            by_ext.setdefault(m["ext"], []).append(m)
+        outputs = []                                   # (path to write, original attachment name)
+        for ext, lst in by_ext.items():
+            keep = _best(lst)
+            outputs.append((keep["work_copy"], keep["name"]))
+            for other in lst:
+                if other is not keep:
+                    file_rows.append((other["name"], "doppelt in dieser E-Mail (gleiche Ausgabe und Format) - übersprungen"))
+        # an EPUB is only generated when no real EPUB of this edition was attached
+        if ".epub" not in by_ext and config.CONVERT_TO_EPUB:
+            for ext in CONVERT_PREFERENCE:
+                if ext in by_ext:
+                    src = _best(by_ext[ext])
+                    epub = os.path.join(src["dir"], "converted.epub")
+                    if calibre.convert(src["work_copy"], epub):
+                        outputs.insert(0, (epub, f"{src['name']} → EPUB umgewandelt"))
+                        if not config.KEEP_ORIGINAL:
+                            outputs = [o for o in outputs if o[0] != src["work_copy"]]
+                    break
+
+        primary = next((p for p, _ in outputs if p.endswith(".epub")), outputs[0][0])
+        cover, cover_src = covers.best_cover(primary, meta, os.path.dirname(primary))
+        covers_used.append(cover_src)
+        os.makedirs(target_dir, mode=config.DIR_MODE, exist_ok=True)
+        for path, label in outputs:
+            calibre.write_meta(path, meta, cover)
+            dst, status = _place(path, target_dir, name + os.path.splitext(path)[1].lower())
+            rel = os.path.relpath(dst, config.LIBRARY_DIR)
+            if status == "duplicate":
+                file_rows.append((label, f"schon in der Bibliothek: {os.path.basename(dst)} - übersprungen"))
+            else:
+                file_rows.append((label, f"neu: {os.path.basename(dst)}"))
+                new_files.append(rel)
+        if config.WRITE_SIDECARS and n == 1:
+            if cover and not os.path.exists(os.path.join(target_dir, "cover.jpg")):
+                shutil.copyfile(cover, os.path.join(target_dir, "cover.jpg"))
+            if not os.path.exists(os.path.join(target_dir, "metadata.opf")):
+                calibre.write_opf(primary, os.path.join(target_dir, "metadata.opf"))
+        if cover and primary.endswith(".pdf") and pdf_only_cover is None:
+            keep = os.path.join(config.WORK_DIR, f"cover_{os.getpid()}_{gi}.jpg")
+            shutil.copyfile(cover, keep)
+            pdf_only_cover = (keep, name + ".pdf")
+
+    for root, _, fs in os.walk(target_dir):
+        for x in fs:
+            try:
+                os.chmod(os.path.join(root, x), config.FILE_MODE)
+            except OSError:
+                pass
+
+    scanned = kavita.scan_folder(target_dir) if new_files else False
+    has_epub = any(f.endswith(".epub") for f in new_files)
+    if pdf_only_cover:
+        if scanned and not has_epub:
+            # PDFs can't carry a cover - give it to Kavita directly once the scan has picked the book up
+            c, fn = pdf_only_cover
+            threading.Thread(target=lambda: (kavita.set_cover(title, fn, c), os.remove(c)), daemon=True).start()
+        else:
+            os.remove(pdf_only_cover[0])
+    return {"ok": True, "title": common["full_title"], "authors": authors, "base": base, "category": category,
+            "new_category": category not in known and not existed_before, "folder_existed": existed_before,
+            "editions": [e or "-" for e in editions] if multi else [], "files": file_rows, "new_files": new_files,
+            "isbn": ", ".join(sorted({re.sub(r"[^\dX]", "", (m["a"].get("isbn") or "")) for m in members} - {""})),
+            "publisher": lead.get("publisher"), "published": lead.get("published"), "language": lead.get("language"),
+            "tags": common["tags"], "confidence": lead.get("confidence"), "cover": ", ".join(sorted(set(covers_used))),
+            "kavita": scanned}

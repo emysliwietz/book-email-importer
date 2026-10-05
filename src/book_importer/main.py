@@ -82,30 +82,40 @@ def save_attachments(msg, outdir: str) -> list[str]:
     return paths
 
 
+def reply_text(results: list[dict], error: str | None = None) -> str:
+    lines = []
+    if error:
+        lines.append(f"Beim Import ist ein Fehler aufgetreten:\n{error}\n")
+    for r in results:
+        if not r.get("ok"):
+            lines += [f"✗ {name}: {status}" for name, status in r["files"]]
+            continue
+        nothing_new = not r.get("new_files")
+        head = "=" if nothing_new else "✓"
+        block = [f"{head} {r['title']} – {', '.join(r['authors']) or 'unbekannt'}",
+                 f"   Ordner: {r['category']}/{r['base']}"
+                 + (" (Kategorie neu angelegt)" if r.get("new_category") else "")
+                 + (" (Ordner gab es schon)" if r.get("folder_existed") else "")]
+        if r.get("editions"):
+            block.append(f"   Ausgaben: {', '.join(r['editions'])}")
+        block += [f"   • {name}: {status}" for name, status in r["files"]]
+        if not nothing_new:
+            block += [f"   ISBN: {r.get('isbn') or '-'} | {r.get('publisher') or '-'} {r.get('published') or ''}"
+                      f" | Sprache: {r.get('language') or '-'}",
+                      f"   Tags: {', '.join(r.get('tags') or [])}",
+                      f"   Cover: {r.get('cover')} | Kavita: {'neu eingelesen' if r.get('kavita') else 'nicht erreicht'}"]
+        lines.append("\n".join(block))
+    if not lines:
+        lines.append("In dieser E-Mail wurde kein E-Book und keine PDF gefunden.")
+    return "\n\n".join(lines) + "\n\nDies ist eine automatisch generierte E-Mail. Beep. Boop.\n"
+
+
 def reply(msg, results: list[dict], error: str | None = None) -> None:
     if not config.REPLY_ENABLED:
         return
     to = [a for _, a in getaddresses(msg.get_all("reply-to", []) or msg.get_all("from", []))]
     if not to:
         return
-    lines = []
-    if error:
-        lines.append(f"Beim Import ist ein Fehler aufgetreten:\n{error}\n")
-    for r in results:
-        if not r.get("ok"):
-            lines.append(f"✗ {r['file']}: {r.get('error')}")
-        elif r.get("duplicate"):
-            lines.append(f"= {r['file']}: schon vorhanden als „{r['base']}“ in {r['category']}")
-        else:
-            lines.append(f"✓ {r['title']} – {', '.join(r['authors']) or 'unbekannt'}\n"
-                         f"   Ordner: {r['category']}{' (neu angelegt)' if r.get('new_category') else ''}\n"
-                         f"   Dateien: {', '.join(os.path.basename(f) for f in r['files'])}\n"
-                         f"   ISBN: {r.get('isbn') or '-'} | {r.get('publisher') or '-'} {r.get('published') or ''}"
-                         f" | Sprache: {r.get('language') or '-'}\n"
-                         f"   Tags: {', '.join(r.get('tags') or [])}\n"
-                         f"   Cover: {r.get('cover')} | Kavita: {'neu eingelesen' if r.get('kavita') else 'nicht erreicht'}")
-    if not lines:
-        lines.append("In dieser E-Mail wurde kein E-Book und keine PDF gefunden.")
     out = EmailMessage()
     out["From"] = config.SMTP_SENDER_EMAIL
     out["To"] = ", ".join(to)
@@ -114,7 +124,7 @@ def reply(msg, results: list[dict], error: str | None = None) -> None:
         out["In-Reply-To"] = msg["message-id"]
         out["References"] = msg["message-id"]
     out["Message-ID"] = make_msgid()
-    out.set_content("\n\n".join(lines) + "\n\nDies ist eine automatisch generierte E-Mail. Beep. Boop.\n")
+    out.set_content(reply_text(results, error))
     try:
         with smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT, timeout=60) as s:
             s.starttls()
@@ -130,7 +140,7 @@ def handle(server: IMAPClient, uid: int, raw: bytes) -> None:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     rcpts = [a.lower() for _, a in getaddresses(msg.get_all("to", []) + msg.get_all("cc", []) +
                                                  msg.get_all("delivered-to", []) + msg.get_all("x-original-to", []))]
-    if config.TARGET_ADDRESS and config.TARGET_ADDRESS not in rcpts:
+    if "*" not in config.TARGET_ADDRESSES and not any(t in rcpts for t in config.TARGET_ADDRESSES):
         return
     senders = [a for _, a in getaddresses(msg.get_all("from", []))]
     if not sender_allowed(senders):
@@ -166,8 +176,8 @@ def connect() -> IMAPClient:
 
 
 def run_once(server: IMAPClient, last_uid: int) -> int:
-    if last_uid == 0:
-        # First start: don't import the whole mailbox history, only what arrives from now on.
+    if not os.path.exists(config.STATE_FILE):
+        # First start (no state file yet): don't import the mailbox history, only what arrives from now on.
         uids = server.search(["ALL"])
         last_uid = max(uids) if uids else 0
         save_state(last_uid)
