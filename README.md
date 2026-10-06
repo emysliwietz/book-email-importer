@@ -91,6 +91,34 @@ On first start the listener ignores the mails already in the inbox and only hand
       - /root/docker/book-importer:/data # state + temp files
 ```
 
+## Run as a normal user (not root)
+
+The image works with any uid. Set `user:` in compose to the owner the books should have, and give that user the
+`/data` volume once:
+
+```yaml
+  book-importer:
+    user: "1000:1000"          # files in the library are created as this uid/gid
+```
+
+```sh
+chown -R 1000:1000 /root/docker/book-importer
+```
+
+Behind NFS the uid has to be the same as on the file server. In an unprivileged Proxmox LXC the container's uids are
+shifted (container uid 1000 = host uid 101000), so map one container uid to the real host uid in the CT config,
+e.g. container 2000 → host 1000, and use `user: "2000:2000"`:
+
+```
+lxc.idmap: u 0 100000 2000
+lxc.idmap: g 0 100000 2000
+lxc.idmap: u 2000 1000 1
+lxc.idmap: g 2000 1000 1
+lxc.idmap: u 2001 102001 63535
+lxc.idmap: g 2001 102001 63535
+```
+(plus `root:1000:1` in `/etc/subuid` and `/etc/subgid` on the Proxmox host, then restart the CT).
+
 ## Retry a mail by hand
 
 E.g. one that failed before retries existed. List the inbox with UIDs, then queue the mail; the running importer

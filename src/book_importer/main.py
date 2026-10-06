@@ -286,7 +286,17 @@ def main() -> None:
         sys.exit(f"LIBRARY_DIR {config.LIBRARY_DIR} does not exist - is the books volume mounted?")
     if not config.ALLOWED_SENDERS:
         print("⚠️ ALLOWED_SENDERS is empty - books from ANY sender will be imported")
-    os.makedirs(config.WORK_DIR, exist_ok=True)
+    # /data must be writable, otherwise the last-seen UID can't be saved and the same mail is imported again and again
+    for d in {os.path.dirname(config.STATE_FILE) or ".", config.WORK_DIR, config.RETRY_DIR, config.CACHE_DIR}:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        if not os.access(d, os.W_OK):
+            sys.exit(f"{d} is not writable for uid {os.getuid()} - chown the /data volume to the user the container runs as")
+    if not os.access(config.LIBRARY_DIR, os.W_OK):
+        print(f"⚠️ LIBRARY_DIR {config.LIBRARY_DIR} is not writable for uid {os.getuid()} - imports will fail and be retried")
+    print(f"👤 running as uid {os.getuid()}, gid {os.getgid()}")
     print(f"📚 book-email-importer: {config.TARGET_ADDRESS} -> {config.LIBRARY_DIR} (model {config.GEMINI_MODEL})")
     pending = retry.entries()
     if pending:
